@@ -24,12 +24,13 @@ from scipy import ndimage as ndi                    # untuk mengolah gambar
 from tensorflow import keras                        # untuk memanggil model yang sudah dilatih
 
 try:
-    from skimage.morphology import skeletonize
+    from skimage.morphology import skeletonize, convex_hull_image
 except ImportError:
     skeletonize = None
+    convex_hull_image = None
 
 # Memuat model
-model = keras.models.load_model(r'C:\Users\fakhr\Downloads\proyek_ 0-4\Latihan_CNN_0_4_v3.keras')
+model = keras.models.load_model(r'C:\Users\fakhr\Downloads\Latihan_CNN_0_4_v3_fix.keras')
 JUMLAH_KELAS = model.output_shape[-1]
 
 # Ketebalan goresan target agar goresan yg di upload user mirip dgn data latih
@@ -138,14 +139,42 @@ def latar_mirip_kertas(asli, label, i, mask, sl, kertas, sisi_foto):
     return sebaran <= SEBARAN_LATAR
 
 
+def potongan_dalam(label, n):
+    """Mencari potongan kecil di DALAM bentuk bulat besar (mata smiley, jarum jam)."""
+    if convex_hull_image is None:
+        return set()
+    ukuran = [max(s[0].stop - s[0].start, s[1].stop - s[1].start) for s in ndi.find_objects(label)]
+    besar = int(np.argmax(ukuran)) + 1
+    bagian = label == besar
+    ys, xs = np.where(bagian)
+    tinggi, lebar = ys.max() - ys.min() + 1, xs.max() - xs.min() + 1
+    if not (0.6 <= tinggi / lebar <= 1.6):
+        return set()                                  # terlalu pipih/tinggi untuk bulatan
+    kulit = convex_hull_image(bagian)
+    # Lingkaran mengisi sekitar 78% kotak pembungkusnya, persegi mengisi 100%
+    if not (0.65 <= kulit.sum() / (tinggi * lebar) <= 0.88):
+        return set()
+    # Bagian dalam = kulit yang dikikis, supaya potongan di tepi (celah cincin) tidak ikut
+    dalam = ndi.binary_erosion(kulit, iterations=max(2, int(0.12 * max(tinggi, lebar))))
+    return {i for i in range(1, n + 1)
+            if i != besar and not (label == i)[~dalam].any()}
+
+
 def sambungkan(g):
     """Menyambung potongan goresan yang terpisah dengan garis di celahnya"""
     label, n = ndi.label(g, structure=np.ones((3, 3)))
     if n <= 1 or n > 40:
         return g
 
+    # Potongan di dalam bentuk bulat (mata smiley, jarum jam) dibiarkan, tidak disambung ke tepinya
+    dalam = potongan_dalam(label, n)
+    luar = [i for i in range(1, n + 1) if i not in dalam]
+    if len(luar) <= 1:
+        return g
+    n = len(luar)
+
     titik = []
-    for i in range(1, n + 1):
+    for i in luar:
         ys, xs = np.where(label == i)
         pts = np.stack([ys, xs], axis=1)
         if len(pts) > 150:
@@ -255,6 +284,25 @@ def urutkan(kandidat):
     return [sorted(b, key=lambda k: k['cx']) for b in baris]
 
 
+def isi_lingkaran(gabung):
+    """Coretan di DALAM bentuk bulat (jarum jam, garis bola) digabung dengan bulatannya jadi satu objek."""
+    label, n = ndi.label(gabung)
+    hasil = gabung.copy()
+    for i, sl in enumerate(ndi.find_objects(label), start=1):
+        bagian = label[sl] == i
+        terisi = ndi.binary_fill_holes(bagian)
+        if terisi.sum() == bagian.sum():
+            continue                                  # tidak ada lubang, bukan bentuk tertutup
+        tinggi, lebar = bagian.shape
+        if not (0.6 <= tinggi / lebar <= 1.6):
+            continue                                  # terlalu pipih/tinggi untuk bulatan
+        # Lingkaran mengisi sekitar 78% kotak pembungkusnya, persegi mengisi 100%
+        if not (0.65 <= terisi.sum() / (tinggi * lebar) <= 0.88):
+            continue
+        hasil[sl] |= terisi                           # lubangnya ditutup, isi di dalamnya ikut satu objek
+    return hasil
+
+
 def siapkan(foto):
     """Mengembalikan (daftar baris berisi objek, peta pengecekan, catatan)."""
 
@@ -308,6 +356,7 @@ def siapkan(foto):
     # 5. Mengumpulkan goresan yang berdekatan jadi satu objek
     r = max(3, int(sisi_foto * JARAK_GABUNG))
     gabung = ndi.distance_transform_edt(~mask) <= r
+    gabung = isi_lingkaran(gabung)                    # coretan di dalam bulatan ikut jadi satu objek
     label, jumlah = ndi.label(gabung)                 # memberi nomor untuk objek yang terpisah
 
     # 6. Memeriksa tiap objek
@@ -476,7 +525,7 @@ web = gr.Interface(
         gr.Image(label='Yang dilihat model (sesuai nomor)'),
         gr.Image(label='Pengecekan (Warna hijau = angka, warna kuning = ragu, warna merah = bukan angka)'),
     ],
-    title='Sistem Klasifikasi Angka berbasis Neural Network V3',
+    title='Sistem Klasifikasi Angka Berbasis Neural Network',
     description='Upload atau foto angka 0-4, lalu model akan menebaknya!',
 )
 

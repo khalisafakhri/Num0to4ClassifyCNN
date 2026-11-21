@@ -993,3 +993,827 @@ print('2 beralas datar dibaca 2    : %.1f%%' % persen(X_2t, 2))
 print('bulatan berisi buatan dibaca Bukan angka : %.1f%%' % persen(X_bit, 5))
 if len(X_bulat_uji) > 0:
     print('gambar bulat (smiley dll) dibaca Bukan angka : %.1f%%' % persen(X_bulat_uji, 5))
+    
+# %% 7. Model v3 (MNIST + Angka 4 buatan + QuickDraw + Dataset sendiri)
+
+import os
+import urllib.request
+import urllib.parse
+import numpy as np
+from tensorflow import keras
+from PIL import Image, ImageDraw
+
+# Pengacak angka
+rng = np.random.default_rng(0)
+keras.utils.set_random_seed(0)         # supaya hasil latihan bisa diulang dan dibandingkan
+
+# Angka 5-9 MNIST tidak dipakai sama sekali
+ANGKA_BUKAN = []
+
+# Jumlah gambar buatan
+JUMLAH_EMPAT_TERTUTUP = 3000   # 4 gaya ketikan
+JUMLAH_SATU_KETIKAN = 2000     # 1 gaya ketikan
+JUMLAH_DUA_ALAS = 2000         # 2 dengan alas datar (supaya tidak tertukar dengan 1)
+JUMLAH_BULAT_ISI = 1000        # bulatan berisi (jam, smiley, bola, lolipop) = Bukan angka
+
+FOLDER_QD = r'C:\Users\fakhr\Downloads\quickdraw'
+FOLDER_FOTO = r'C:\Users\fakhr\Downloads\data_foto'
+
+
+def ri(a, b):
+    return int(rng.integers(a, b))
+
+
+def pusatkan(arr):
+    # Potong gambar tepat di sekitar goresan, jadikan persegi, kecilkan ke 20x20, lalu taruh di center 28x28
+    ys, xs = np.where(arr > 0)
+    potongan = arr[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+    h, w = potongan.shape
+    sisi = max(h, w)
+    persegi = np.zeros((sisi, sisi), dtype='uint8')
+    persegi[(sisi - h) // 2:(sisi - h) // 2 + h, (sisi - w) // 2:(sisi - w) // 2 + w] = potongan
+    kecil = np.array(Image.fromarray(persegi).resize((20, 20), Image.LANCZOS))
+    kanvas = np.zeros((28, 28), dtype='uint8')
+    kanvas[4:24, 4:24] = kecil
+    return kanvas.astype('float32') / 255
+
+
+def goyang(titik, besar=3):
+    # Geser tiap titik sedikit supaya garis tidak terlalu lurus
+    return [(x + ri(-besar, besar + 1), y + ri(-besar, besar + 1)) for x, y in titik]
+
+
+def gambar_empat_tertutup():
+    # Angka 4 yang bagian atasnya tersambung
+    u = 112
+    img = Image.new('L', (u, u), 0)
+    d = ImageDraw.Draw(img)
+    tebal = ri(6, 13)
+    xv, ytop, ybot = ri(55, 75), ri(12, 26), ri(86, 102)
+    xl, ymid = ri(20, 40), ri(55, 72)
+    if ri(0, 2) == 0:
+        xr = xv + ri(8, 26)
+        d.line([(xv + ri(-4, 5), ytop), (xl, ymid), (xr, ymid)], fill=255, width=tebal, joint='curve')
+    else:
+        d.line([(xv, ytop), (xl, ymid), (xv, ymid)], fill=255, width=tebal, joint='curve')
+    d.line([(xv, ytop), (xv + ri(-5, 6), ybot)], fill=255, width=tebal)
+    return pusatkan(np.array(img))
+
+
+def gambar_satu_ketikan():
+    # Angka 1 dengan beragam gaya tulisan
+    u = 112
+    img = Image.new('L', (u, u), 0)
+    d = ImageDraw.Draw(img)
+    tebal = ri(5, 12)
+    ytop, ybot = ri(12, 24), ri(88, 102)                       # ujung atas dan bawah batang
+    miring = rng.uniform(-0.35, 0.35)                          # kemiringan batang
+    xc = ri(48, 64)                                            # posisi tengah batang
+    xtop = xc + int(miring * (ybot - ytop) / 2)
+    xbot = xc - int(miring * (ybot - ytop) / 2)
+    d.line(goyang([(xtop, ytop), (xbot, ybot)], 2), fill=255, width=tebal)
+    if ri(0, 10) < 8:
+        d.line(goyang([(xtop, ytop), (xtop - ri(10, 22), ytop + ri(8, 20))], 2), fill=255, width=tebal)
+    if ri(0, 10) < 6:
+        setengah = ri(14, 30)
+        d.line(goyang([(xbot - setengah, ybot), (xbot + setengah, ybot)], 2), fill=255, width=tebal)
+    return pusatkan(np.array(img))
+
+
+def gambar_dua_ketikan():
+    # Angka 2 dengan alas datar di bawah: lengkung di atas, diagonal turun, lalu garis alas.
+    # Alas kadang menjorok keluar (seperti garis bawah). Supaya model tidak mengira alas datar = angka 1.
+    u = 112
+    img = Image.new('L', (u, u), 0)
+    d = ImageDraw.Draw(img)
+    tebal = ri(5, 12)
+    xl, xr = ri(22, 36), ri(72, 92)                              # tepi kiri dan kanan angka
+    ytop, ybot = ri(12, 24), ri(86, 102)                         # puncak dan alas
+    rx, ry = (xr - xl) // 2, ri(20, 32)                          # ukuran lengkung atas
+    cx, cy = (xl + xr) // 2, ytop + ry
+    awal, akhir = rng.uniform(150, 195), rng.uniform(-35, 10)    # sudut awal dan akhir lengkung
+    sudut = np.deg2rad(np.linspace(awal, akhir, 12))
+    badan = [(cx + rx * np.cos(t), cy - ry * np.sin(t)) for t in sudut]
+    badan.append((xl + ri(-3, 4), ybot))                          # diagonal turun ke kiri bawah
+    d.line(goyang(badan, 2), fill=255, width=tebal, joint='curve')
+    if ri(0, 10) < 9:                                            # alas datar (90%)
+        d.line(goyang([(xl - ri(0, 8), ybot), (xr + ri(0, 10), ybot)], 2), fill=255, width=tebal)
+    return pusatkan(np.array(img))
+
+
+def gambar_bulat_isi():
+    # Bentuk bulat yang ada isinya (jam, smiley, bola, lolipop). Supaya tidak dibaca sebagai angka 0.
+    u = 112
+    img = Image.new('L', (u, u), 0)
+    d = ImageDraw.Draw(img)
+    tebal = ri(5, 11)
+    lebar, tinggi = ri(60, 84), ri(60, 84)                       # ukuran bulatan
+    x0, y0 = (u - lebar) // 2, (u - tinggi) // 2 - ri(0, 6)
+    x1, y1 = x0 + lebar, y0 + tinggi
+    cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
+    jenis = ri(0, 4)
+    if ri(0, 10) < 2:                                            # kadang ada celah sangat kecil (seperti gambar tangan)
+        d.arc([x0, y0, x1, y1], ri(0, 15), ri(345, 360), fill=255, width=tebal)
+    else:
+        d.ellipse([x0, y0, x1, y1], outline=255, width=tebal)
+    if jenis == 0:                                               # jam: dua jarum dari tengah
+        for panjang in (ri(14, 24), ri(22, 32)):
+            sudut = rng.uniform(0, 2 * np.pi)
+            d.line(goyang([(cx, cy), (cx + panjang * np.cos(sudut), cy + panjang * np.sin(sudut))], 1), fill=255, width=max(3, tebal - 2))
+    elif jenis == 1:                                             # smiley: dua mata dan mulut
+        mata = ri(3, 6)
+        for ex in (cx - lebar // 5, cx + lebar // 5):
+            d.ellipse([ex - mata, cy - tinggi // 6 - mata, ex + mata, cy - tinggi // 6 + mata], fill=255)
+        d.arc([cx - lebar // 4, cy, cx + lebar // 4, cy + tinggi // 3], 20, 160, fill=255, width=max(3, tebal - 2))
+    elif jenis == 2:                                             # bola: garis silang atau lengkung di dalam
+        d.line([(x0, cy), (x1, cy)], fill=255, width=max(3, tebal - 2))
+        d.line([(cx, y0), (cx, y1)], fill=255, width=max(3, tebal - 2))
+    elif jenis == 3:                                             # lolipop: tangkai di luar bulatan
+        sudut = np.deg2rad(rng.uniform(60, 120))
+        d.line([(cx + (lebar // 2) * np.cos(sudut), cy + (tinggi // 2) * np.sin(sudut)),
+                (cx + (lebar // 2 + ri(20, 34)) * np.cos(sudut), cy + (tinggi // 2 + ri(20, 34)) * np.sin(sudut))],
+               fill=255, width=tebal)
+    else:                                                        # titik atau coretan kecil di dalam
+        for _ in range(ri(1, 4)):
+            px, py, r = cx + ri(-lebar // 4, lebar // 4 + 1), cy + ri(-tinggi // 4, tinggi // 4 + 1), ri(3, 7)
+            d.ellipse([px - r, py - r, px + r, py + r], fill=255)
+    return pusatkan(np.array(img))
+
+
+def gambar_acak():
+    # Bentuk buatan untuk opsi "Bukan angka"
+    u = 112
+    img = Image.new('L', (u, u), 0)
+    d = ImageDraw.Draw(img)
+    jenis = ri(0, 4)
+    tebal = ri(6, 16)
+
+    def titik():
+        return (ri(10, u - 10), ri(10, u - 10))
+
+    if jenis == 0:
+        x1, dx, y1 = ri(10, 40), ri(40, 62), ri(30, 82)
+        dy = ri(-dx // 2, dx // 2 + 1)
+        d.line([(x1, y1), (x1 + dx, int(np.clip(y1 + dy, 10, 100)))], fill=255, width=tebal)
+    elif jenis == 1:
+        d.line([titik() for _ in range(ri(4, 9))], fill=255, width=tebal, joint='curve')
+    elif jenis == 2:
+        a, b = titik(), titik()
+        d.ellipse([min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]) + 12, max(a[1], b[1]) + 12], fill=255)
+    else:
+        d.line([titik() for _ in range(ri(8, 16))], fill=255, width=tebal)
+    return pusatkan(np.array(img))
+
+
+# Data MNIST
+(Xa, ya), (Xb, yb) = keras.datasets.mnist.load_data()
+Xa, Xb = Xa / 255, Xb / 255
+
+
+def susun_mnist(X, y):
+    pilih = np.isin(y, [0, 1, 2, 3, 4] + ANGKA_BUKAN)
+    return X[pilih].astype('float32'), np.where(y[pilih] < 5, y[pilih], 5)
+
+
+X_m, y_m = susun_mnist(Xa, ya)
+X_mt, y_mt = susun_mnist(Xb, yb)
+
+# Data buatan
+X_4 = np.array([gambar_empat_tertutup() for _ in range(JUMLAH_EMPAT_TERTUTUP)], dtype='float32')
+X_4t = np.array([gambar_empat_tertutup() for _ in range(500)], dtype='float32')
+X_1 = np.array([gambar_satu_ketikan() for _ in range(JUMLAH_SATU_KETIKAN)], dtype='float32')
+X_1t = np.array([gambar_satu_ketikan() for _ in range(300)], dtype='float32')
+X_2 = np.array([gambar_dua_ketikan() for _ in range(JUMLAH_DUA_ALAS)], dtype='float32')
+X_2t = np.array([gambar_dua_ketikan() for _ in range(300)], dtype='float32')
+X_bi = np.array([gambar_bulat_isi() for _ in range(JUMLAH_BULAT_ISI)], dtype='float32')
+X_bit = np.array([gambar_bulat_isi() for _ in range(300)], dtype='float32')
+X_j = np.array([gambar_acak() for _ in range(8000)], dtype='float32')
+X_jt = np.array([gambar_acak() for _ in range(1500)], dtype='float32')
+
+# Data QuickDraw (file yang belum ada akan diunduh dulu dari Google)
+X_q, X_qt = np.zeros((0, 28, 28), dtype='float32'), np.zeros((0, 28, 28), dtype='float32')
+
+# Coretan biasa yang diajarkan sebagai "Bukan angka"
+KATEGORI_BIASA = ['headphones', 'hand', 'pencil', 'cloud', 'lightning', 'star', 'fish', 'tree']
+PER_BIASA = 1500        # gambar latihan per kategori
+
+# Gambar bulat yang ada tambahannya (supaya tidak dibaca sebagai angka 0)
+KATEGORI_BULAT = ['smiley face', 'lollipop', 'clock', 'donut', 'sun', 'basketball']
+PER_BULAT = 250         # kecilkan kalau angka 0 asli jadi sering salah dibaca
+
+daftar_q, daftar_qt, daftar_bulat_uji = [], [], []
+n_bulat = 0
+
+os.makedirs(FOLDER_QD, exist_ok=True)
+
+for nama in KATEGORI_BIASA + KATEGORI_BULAT:
+    bulat = nama in KATEGORI_BULAT
+    path = os.path.join(FOLDER_QD, nama + '.npy')
+    if not os.path.exists(path):
+        try:
+            print('Mengunduh', nama, '...')
+            alamat = 'https://storage.googleapis.com/quickdraw_dataset/full/numpy_bitmap/' + urllib.parse.quote(nama) + '.npy'
+            urllib.request.urlretrieve(alamat, path)     # quote: spasi pada "smiley face" diubah jadi %20
+        except Exception as e:
+            print('Gagal mengunduh', nama, ':', type(e).__name__, e)
+            if os.path.exists(path):
+                os.remove(path)                          # buang file yang terunduh setengah jalan
+            continue
+    data = np.load(path, mmap_mode='r')
+    jumlah = PER_BULAT if bulat else PER_BIASA
+    for baris in data[:jumlah]:                          # bagian awal untuk latihan
+        a = np.array(baris).reshape(28, 28)
+        if (a > 40).any():
+            daftar_q.append(pusatkan(np.where(a > 40, a, 0).astype('uint8')))
+            if bulat:
+                n_bulat += 1
+    for baris in data[2500:2700]:                        # bagian setelahnya untuk uji (tidak tercampur)
+        a = np.array(baris).reshape(28, 28)
+        if (a > 40).any():
+            hasil = pusatkan(np.where(a > 40, a, 0).astype('uint8'))
+            daftar_qt.append(hasil)
+            if bulat:
+                daftar_bulat_uji.append(hasil)
+
+if daftar_q:
+    X_q, X_qt = np.array(daftar_q, dtype='float32'), np.array(daftar_qt, dtype='float32')
+X_bulat_uji = np.array(daftar_bulat_uji, dtype='float32')
+
+print('QuickDraw dipakai:', len(X_q), 'gambar (yang bulat:', n_bulat, ')')
+
+# Pengolah foto
+from scipy import ndimage as ndi                    # untuk mengolah gambar
+
+try:
+    from skimage.morphology import skeletonize, convex_hull_image   # menipiskan goresan, dan mencari bentuk bulat
+except ImportError:
+    skeletonize = None
+    convex_hull_image = None
+    print('PERINGATAN: scikit-image belum terpasang, goresan tidak ditipiskan (beda dengan web)')
+
+# Ketebalan goresan target agar goresan yg di upload user mirip dgn data latih
+TEBAL_TARGET = 0.12
+
+# Angka hanya dianggap terbaca kalau keyakinan model di atas 75%
+BATAS_YAKIN = 0.75
+
+# Jumlah angka maksimal yang dibaca dalam satu foto
+MAKS_ANGKA = 30
+
+# Goresan yang jaraknya dekat dianggap satu angka
+JARAK_GABUNG = 0.017
+
+# Potongan goresan yang lebih kecil dari ini dibuang
+BUANG_BINTIK = 0.00004
+
+# Objek yang jumlah goresannya kurang dari ini dibuang
+LUAS_REL = 0.1
+
+# Periksa background
+TOLERANSI_WARNA = 0.05    # selisih warna yang masih diterima
+TERANG_MIN = 0.5          # batas bawah kecerahan bg dibanding kertas
+TERANG_MAX = 1.8          # batas atas kecerahan bg dibanding kertas
+
+# Menyeragamkan warna background
+SEBARAN_LATAR = 0.2
+
+# Seberapa jauh dari goresan area background di cek
+RING_LOKAL = 0.025
+
+# Objek yang terlalu dekat dengan tepi foto dibuang
+MARGIN_TEPI = 0.015
+
+# Dua goresan yang celahnya lebih kecil dari ini disambung garis
+JARAK_SAMBUNG = 0.18
+
+# Fungsi Pengolah Foto
+def otsu(arr):
+    # Mencari "garis batas" terang-gelap
+    hist, _ = np.histogram(arr, bins=256, range=(0, 256))
+    total = arr.size
+    jumlah_semua = np.dot(np.arange(256), hist)
+    jumlah_b, bobot_b, terbaik, batas = 0.0, 0, 0.0, 0
+    for t in range(256):
+        bobot_b += hist[t]
+        if bobot_b == 0:
+            continue
+        bobot_f = total - bobot_b
+        if bobot_f == 0:
+            break
+        jumlah_b += t * hist[t]
+        rata_b = jumlah_b / bobot_b
+        rata_f = (jumlah_semua - jumlah_b) / bobot_f
+        selisih = bobot_b * bobot_f * (rata_b - rata_f) ** 2
+        if selisih > terbaik:
+            terbaik, batas = selisih, t
+    return batas
+
+
+def latar_mirip_kertas(asli, label, i, mask, sl, kertas, sisi_foto):
+    # Memeriksa background di sekeliling objek
+    h0, w0 = asli.shape[:2]
+    jarak_ring = max(8, int(sisi_foto * RING_LOKAL))
+    p = jarak_ring + 4
+    y0, y1 = max(sl[0].start - p, 0), min(sl[0].stop + p, h0)
+    x0, x1 = max(sl[1].start - p, 0), min(sl[1].stop + p, w0)
+
+    blob = label[y0:y1, x0:x1] == i
+    goresan = mask[y0:y1, x0:x1] & blob
+    if goresan.sum() == 0:
+        return True
+
+    semua_tinta = ndi.binary_dilation(mask[y0:y1, x0:x1], iterations=2)
+    jarak = ndi.distance_transform_edt(~goresan)
+    cincin = (jarak > 3) & (jarak <= jarak_ring) & ~semua_tinta
+    if cincin.sum() < 30:
+        return True
+
+    piksel = asli[y0:y1, x0:x1][cincin].astype('float32')
+    warna = np.median(piksel, axis=0)
+    
+    kroma_obj = warna / max(float(warna.sum()), 1.0)
+    kroma_kertas = kertas / max(float(kertas.sum()), 1.0)
+    selisih_warna = float(np.abs(kroma_obj - kroma_kertas).max())
+
+    # Bandingkan brightness bg dengan brightness kertas utama
+    rasio = (float(warna.mean()) + 1) / (float(kertas.mean()) + 1)
+
+    # Kalau warna atau brightness jauh beda dari kertas, tolak
+    if not (selisih_warna <= TOLERANSI_WARNA and TERANG_MIN <= rasio <= TERANG_MAX):
+        return False
+
+    # Kalau ada dua warna yang jauh berbeda di sekitar goresan, itu tepi benda
+    p10 = np.percentile(piksel, 10, axis=0)
+    p90 = np.percentile(piksel, 90, axis=0)
+    sebaran = float(np.max((p90 - p10) / (piksel.mean(axis=0) + 1)))
+    return sebaran <= SEBARAN_LATAR
+
+
+def potongan_dalam(label, n):
+    """Mencari potongan kecil di DALAM bentuk bulat besar (mata smiley, jarum jam)."""
+    if convex_hull_image is None:
+        return set()
+    ukuran = [max(s[0].stop - s[0].start, s[1].stop - s[1].start) for s in ndi.find_objects(label)]
+    besar = int(np.argmax(ukuran)) + 1
+    bagian = label == besar
+    ys, xs = np.where(bagian)
+    tinggi, lebar = ys.max() - ys.min() + 1, xs.max() - xs.min() + 1
+    if not (0.6 <= tinggi / lebar <= 1.6):
+        return set()                                  # terlalu pipih/tinggi untuk bulatan
+    kulit = convex_hull_image(bagian)
+    # Lingkaran mengisi sekitar 78% kotak pembungkusnya, persegi mengisi 100%
+    if not (0.65 <= kulit.sum() / (tinggi * lebar) <= 0.88):
+        return set()
+    # Bagian dalam = kulit yang dikikis, supaya potongan di tepi (celah cincin) tidak ikut
+    dalam = ndi.binary_erosion(kulit, iterations=max(2, int(0.12 * max(tinggi, lebar))))
+    return {i for i in range(1, n + 1)
+            if i != besar and not (label == i)[~dalam].any()}
+
+
+def sambungkan(g):
+    """Menyambung potongan goresan yang terpisah dengan garis di celahnya"""
+    label, n = ndi.label(g, structure=np.ones((3, 3)))
+    if n <= 1 or n > 40:
+        return g
+
+    # Potongan di dalam bentuk bulat (mata smiley, jarum jam) dibiarkan, tidak disambung ke tepinya
+    dalam = potongan_dalam(label, n)
+    luar = [i for i in range(1, n + 1) if i not in dalam]
+    if len(luar) <= 1:
+        return g
+    n = len(luar)
+
+    titik = []
+    for i in luar:
+        ys, xs = np.where(label == i)
+        pts = np.stack([ys, xs], axis=1)
+        if len(pts) > 150:
+            pts = pts[np.linspace(0, len(pts) - 1, 150).astype(int)]
+        titik.append(pts)
+
+    # Hitung jarak terdekat antara tiap potongan
+    jarak = np.full((n, n), np.inf)
+    pasangan = {}
+    for a in range(n):
+        for b in range(a + 1, n):
+            d = np.sqrt(((titik[a][:, None, :] - titik[b][None, :, :]) ** 2).sum(-1))
+            idx = np.unravel_index(np.argmin(d), d.shape)
+            jarak[a, b] = jarak[b, a] = d[idx]
+            pasangan[(a, b)] = (titik[a][idx[0]], titik[b][idx[1]])
+
+    # Pastikan semua potongan tersambung
+    sambung = set()
+    terhubung = {0}
+    while len(terhubung) < n:
+        terbaik = None
+        for a in terhubung:
+            for b in range(n):
+                if b not in terhubung and (terbaik is None or jarak[a, b] < terbaik[0]):
+                    terbaik = (jarak[a, b], a, b)
+        sambung.add((min(terbaik[1], terbaik[2]), max(terbaik[1], terbaik[2])))
+        terhubung.add(terbaik[2])
+
+    # Celah lain yang cukup dekat juga disambung
+    ukuran = max(g.shape)
+    for (a, b), d in ((k, jarak[k]) for k in pasangan):
+        if d <= JARAK_SAMBUNG * ukuran:
+            sambung.add((a, b))
+
+    # Gambar garis lurus pendek di tiap celah yang harus disambung
+    img = Image.fromarray(g.astype('uint8') * 255)
+    gambar = ImageDraw.Draw(img)
+    for a, b in sambung:
+        p, q = pasangan[(a, b)]
+        gambar.line([(int(p[1]), int(p[0])), (int(q[1]), int(q[0]))], fill=255, width=1)
+    return np.array(img) > 0
+
+
+def rapikan(g):
+    """Menyambung goresan putus-putus, lalu menipiskannya jadi garis 1 piksel."""
+    g = sambungkan(g)
+    if skeletonize is not None:
+        g = skeletonize(g)
+    return g.astype(bool)
+
+
+def normalisasi(g):
+    """Mengubah satu goresan menjadi gambar 28x28px."""
+    g = np.pad(g, 30)     # menambahkan ruang kosong di sekeliling supaya aman saat diproses
+    ys, xs = np.where(g)
+    if len(ys) == 0:
+        return None
+    sisi = max(ys.max() - ys.min() + 1, xs.max() - xs.min() + 1)
+
+    # Samakan ketebalan goresan dengan MNIST
+    luas_g = g.sum()
+    keliling = (g & ~ndi.binary_erosion(g)).sum()
+    lebar_goresan = 2 * luas_g / max(keliling, 1)
+    target = TEBAL_TARGET * sisi
+    tebal = g
+    if lebar_goresan < target:
+        tebal = ndi.binary_dilation(g, iterations=max(1, int(round((target - lebar_goresan) / 2))))
+    elif lebar_goresan > target * 1.5:
+        kurus = ndi.binary_erosion(g, iterations=max(1, int(round((lebar_goresan - target) / 2))))
+        if kurus.sum() > 0:
+            tebal = kurus
+
+    # Potong pas di sekeliling angka, lalu jadikan persegi
+    ys, xs = np.where(tebal)
+    potongan = tebal[ys.min():ys.max() + 1, xs.min():xs.max() + 1].astype('float32') * 255
+    h, w = potongan.shape
+    sisi = max(h, w)
+    kotak = np.zeros((sisi, sisi), dtype='float32')
+    kotak[(sisi - h) // 2:(sisi - h) // 2 + h, (sisi - w) // 2:(sisi - w) // 2 + w] = potongan
+
+    # Perkecil atau perbesar ke 20x20 piksel
+    kecil20 = Image.fromarray(kotak.clip(0, 255).astype('uint8')).resize((20, 20), Image.LANCZOS)
+    kecil20 = np.array(kecil20).astype('float32')
+    if kecil20.max() == 0:
+        return None
+    kecil20 = kecil20 / kecil20.max() * 255
+
+    # Taruh di tengah kanvas 28x28, lalu di jadikan center
+    kanvas = np.zeros((28, 28), dtype='float32')
+    kanvas[4:24, 4:24] = kecil20
+    cy, cx = ndi.center_of_mass(kanvas)
+    kanvas = ndi.shift(kanvas, (13.5 - cy, 13.5 - cx), order=1)
+    return (kanvas / 255).clip(0, 1).astype('float32')
+
+
+def urutkan(kandidat):
+    """Mengurutkan objek, kalau baris dari atas ke bawah, di dalam baris dari kiri ke kanan."""
+    tinggi_med = np.median([k['tinggi'] for k in kandidat])
+    kandidat = sorted(kandidat, key=lambda k: k['cy'])
+    baris = []
+    for k in kandidat:
+        # Kalau tingginya posisi hampir sama dengan baris sebelumnya, masuk baris yang sama
+        if baris and abs(k['cy'] - np.mean([x['cy'] for x in baris[-1]])) < 0.6 * tinggi_med:
+            baris[-1].append(k)
+        else:
+            baris.append([k])
+    return [sorted(b, key=lambda k: k['cx']) for b in baris]
+
+
+def isi_lingkaran(gabung):
+    """Coretan di DALAM bentuk bulat (jarum jam, garis bola) digabung dengan bulatannya jadi satu objek."""
+    label, n = ndi.label(gabung)
+    hasil = gabung.copy()
+    for i, sl in enumerate(ndi.find_objects(label), start=1):
+        bagian = label[sl] == i
+        terisi = ndi.binary_fill_holes(bagian)
+        if terisi.sum() == bagian.sum():
+            continue                                  # tidak ada lubang, bukan bentuk tertutup
+        tinggi, lebar = bagian.shape
+        if not (0.6 <= tinggi / lebar <= 1.6):
+            continue                                  # terlalu pipih/tinggi untuk bulatan
+        # Lingkaran mengisi sekitar 78% kotak pembungkusnya, persegi mengisi 100%
+        if not (0.65 <= terisi.sum() / (tinggi * lebar) <= 0.88):
+            continue
+        hasil[sl] |= terisi                           # lubangnya ditutup, isi di dalamnya ikut satu objek
+    return hasil
+
+
+def siapkan(foto):
+    """Mengembalikan."""
+
+    # 1. Ambil foto dan perkecil kalau sangat besar
+    img = Image.fromarray(foto).convert('RGB')
+    img.thumbnail((800, 800))
+    asli = np.array(img)
+    arr = asli.astype('float32')
+    h0, w0 = arr.shape[:2]
+    sisi_foto = min(h0, w0)
+    
+    peta = asli.copy()
+
+    # Warna kertas utama foto
+    kertas = np.median(asli.reshape(-1, 3), axis=0).astype('float32')
+
+    # 2. Haluskan bintik"/noise sedikit
+    arr = ndi.gaussian_filter(arr, sigma=(0.7, 0.7, 0))
+
+    # 3. Mencari goresan
+    ukuran = max(9, int(sisi_foto * 0.08)) | 1
+    gelap = np.zeros((h0, w0), dtype='float32')
+    terang = np.zeros((h0, w0), dtype='float32')
+    for c in range(3):
+        kanal = arr[:, :, c]
+        gelap += (ndi.grey_closing(kanal, size=(ukuran, ukuran)) - kanal) ** 2
+        terang += (kanal - ndi.grey_opening(kanal, size=(ukuran, ukuran))) ** 2
+    gelap = np.sqrt(gelap)
+    terang = np.sqrt(terang)
+
+    sinyal = terang if terang.sum() > 3 * gelap.sum() else gelap
+
+    if sinyal.max() < 15:
+        return [], peta, 'Tidak ada tulisan yang terdeteksi di foto.'
+    arr = sinyal / sinyal.max() * 255
+
+    # 4. Mencari nilai yang dianggap goresan
+    batas = max(otsu(arr) * 0.5, 30)
+    mask = arr > batas
+
+    # 4b. Membuang bintik/noise
+    label_m, n_m = ndi.label(mask, structure=np.ones((3, 3)))
+    if n_m > 0:
+        nomor = np.arange(1, n_m + 1)
+        luas_potongan = np.array(ndi.sum(mask.astype('float32'), label_m, index=nomor))
+        luas_min_potongan = max(6, int(sisi_foto ** 2 * BUANG_BINTIK))
+        mask = np.isin(label_m, nomor[luas_potongan >= luas_min_potongan])
+    if not mask.any():
+        return [], peta, 'Tidak ada tulisan yang terdeteksi di foto (hanya bintik halus).'
+    
+    # 5. Mengumpulkan goresan yang berdekatan jadi satu objek
+    r = max(3, int(sisi_foto * JARAK_GABUNG))
+    gabung = ndi.distance_transform_edt(~mask) <= r
+    gabung = isi_lingkaran(gabung)                    # coretan di dalam bulatan ikut jadi satu objek
+    label, jumlah = ndi.label(gabung)                 # memberi nomor untuk objek yang terpisah
+
+    # 6. Memeriksa tiap objek
+    margin = max(2, int(sisi_foto * MARGIN_TEPI))
+    kandidat = []
+    ditolak_latar = 0
+    for i, sl in enumerate(ndi.find_objects(label), start=1):
+        if sl is None:
+            continue
+        g = mask[sl] & (label[sl] == i)
+        luas = int(g.sum())
+        if luas < 12:
+            continue   # terlalu kecil, dianggap noda
+
+        # Terlalu dekat tepi foto
+        if (sl[0].start < margin or sl[1].start < margin
+                or sl[0].stop > h0 - margin or sl[1].stop > w0 - margin):
+            continue
+
+        ys, xs = np.where(g)
+        tinggi = ys.max() - ys.min() + 1
+        lebar = xs.max() - xs.min() + 1
+
+        # Ukuran harus wajar
+        besar = max(tinggi, lebar) / sisi_foto
+        if besar < 0.04 or besar > 0.95:
+            continue
+
+        # Bentuk angka tidak boleh pipih dan lebar
+        rasio = tinggi / lebar
+        if rasio < 0.6 or rasio > 15:
+            continue
+
+        # Angka berupa goresan
+        isi = luas / (tinggi * lebar)
+        if rasio < 3 and isi > 0.65:
+            continue
+
+        # Background di sekeliling objek harus seragam di kedua sisi
+        if not latar_mirip_kertas(asli, label, i, mask, sl, kertas, sisi_foto):
+            ditolak_latar += 1
+            continue
+
+        kandidat.append(dict(
+            sl=sl, g=g, luas=luas, tinggi=tinggi,
+            ukuran=max(tinggi, lebar),
+            cy=(sl[0].start + sl[0].stop) / 2,
+            cx=(sl[1].start + sl[1].stop) / 2,
+        ))
+
+    # Kalau tidak ada objek yang terdeteksi, tampilkan alasannya
+    if not kandidat:
+        if ditolak_latar:
+            return [], peta, 'Ada goresan di foto, tapi tidak tertulis di foto yang kamu kirim.'
+        return [], peta, 'Ada objek di foto, tapi bentuknya tidak mirip angka.'
+
+    # Buang titik/pengotor yang jauh lebih kecil dibanding objek terbesar
+    terbesar = max(k['ukuran'] for k in kandidat)
+    kandidat = [k for k in kandidat if k['ukuran'] >= 0.35 * terbesar]
+    # Buang juga objek yang jumlah goresannya sangat sedikit
+    luas_terbesar = max(k['luas'] for k in kandidat)
+    kandidat = [k for k in kandidat if k['luas'] >= LUAS_REL * luas_terbesar]
+    kandidat = sorted(kandidat, key=lambda k: k['luas'], reverse=True)[:MAKS_ANGKA]
+
+    # 7. Urutkan, lalu ubah tiap objek jadi gambar 28x28px
+    baris_hasil = []
+    for baris in urutkan(kandidat):
+        item = []
+        for k in baris:
+            k['arr'] = normalisasi(rapikan(k['g']))
+            if k['arr'] is not None:
+                item.append(k)
+        if item:
+            baris_hasil.append(item)
+
+    return baris_hasil, peta, ''
+
+
+# Dataset yang di foto sendiri
+X_f, y_f = np.zeros((0, 28, 28), dtype='float32'), np.zeros(0, dtype=int)
+
+try:
+    NAMA = ['0', '1', '2', '3', '4', 'bukan']
+    daftar_x, daftar_y = [], []
+
+    for kelas, nama in enumerate(NAMA):
+        folder = os.path.join(FOLDER_FOTO, 'latih', nama)
+        if not os.path.isdir(folder):
+            continue
+        for f in sorted(os.listdir(folder)):
+            if f.lower().endswith(('.jpg', '.jpeg', '.png')):
+                foto = np.array(Image.open(os.path.join(folder, f)).convert('RGB'))
+                baris, _, _ = siapkan(foto)          # foto dipotong jadi gambar 28x28 per angka
+                for b in baris:
+                    for k in b:
+                        daftar_x.append(k['arr'])
+                        daftar_y.append(kelas)
+
+    if daftar_x:
+        X_f = np.repeat(np.array(daftar_x, dtype='float32'), 15, axis=0)
+        y_f = np.repeat(np.array(daftar_y), 15)
+        X_f = np.clip(X_f + rng.normal(0, 0.03, X_f.shape), 0, 1).astype('float32')
+
+except Exception as e:
+    print('Foto sendiri dilewati:', type(e).__name__, e)
+
+print('Foto sendiri dipakai:', len(X_f), 'gambar (setelah diulang)')
+
+# Gabungkan data
+X_train = np.concatenate([X_m, X_4, X_1, X_2, X_bi, X_j, X_q, X_f]).astype('float32')
+y_train = np.concatenate([
+    y_m,
+    np.full(len(X_4), 4),
+    np.full(len(X_1), 1),
+    np.full(len(X_2), 2),
+    np.full(len(X_bi), 5),
+    np.full(len(X_j), 5),
+    np.full(len(X_q), 5),
+    y_f
+])
+
+acak = rng.permutation(len(X_train))
+X_train, y_train = X_train[acak], y_train[acak]
+
+X_test = np.concatenate([X_mt, X_4t, X_1t, X_2t, X_bit, X_jt, X_qt]).astype('float32')
+y_test = np.concatenate([
+    y_mt,
+    np.full(len(X_4t), 4),
+    np.full(len(X_1t), 1),
+    np.full(len(X_2t), 2),
+    np.full(len(X_bit), 5),
+    np.full(len(X_jt), 5),
+    np.full(len(X_qt), 5)
+])
+
+print('Data latihan:', X_train.shape, '| per kelas:', np.bincount(y_train, minlength=6))
+
+# Model (susunannya sama dengan model v2)
+cnn = keras.Sequential([
+    keras.Input(shape=(28, 28)),
+    keras.layers.Reshape((28, 28, 1)),
+    keras.layers.RandomRotation(0.03, fill_mode='constant', fill_value=0.0),
+    keras.layers.RandomTranslation(0.1, 0.1, fill_mode='constant', fill_value=0.0),
+    keras.layers.RandomZoom(0.15, fill_mode='constant', fill_value=0.0),
+    keras.layers.Conv2D(32, 3, activation='relu'),
+    keras.layers.MaxPooling2D(),
+    keras.layers.Conv2D(64, 3, activation='relu'),
+    keras.layers.MaxPooling2D(),
+    keras.layers.Flatten(),
+    keras.layers.Dropout(0.3),
+    keras.layers.Dense(64, activation='relu'),
+    keras.layers.Dense(6, activation='softmax')
+])
+
+cnn.compile(
+    optimizer='adam',
+    loss='sparse_categorical_crossentropy',
+    metrics=['accuracy']
+)
+
+# Bobot supaya angka 0-4 dihitung seimbang
+jumlah = np.bincount(y_train, minlength=6)
+rata = jumlah[:5].mean()
+bobot = {k: float(rata / jumlah[k]) for k in range(5)}
+bobot[5] = 1.0
+print('Bobot per kelas:', {k: round(v, 2) for k, v in bobot.items()})
+
+riwayat = cnn.fit(X_train, y_train, epochs=20, validation_data=(X_test, y_test))
+cnn.evaluate(X_test, y_test)
+
+# Disimpan sebagai model akhir (v3)
+cnn.save(r'C:\Users\fakhr\Downloads\Latihan_CNN_0_4_v3_fix_mau_buat_grafik.keras')
+print('Tersimpan: Latihan_CNN_0_4_v3_fix_mau_buat_grafik_fix.keras')
+
+# %% 8. Grafik hasil model v3 (akurasi, loss, dan confusion matrix)
+# Jalankan SETELAH Cell 7 selesai, di sesi Spyder yang sama (jangan restart kernel),
+# karena cell ini memakai variabel dari Cell 7: riwayat, cnn, X_test, y_test.
+
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+
+FOLDER_GRAFIK = r'C:\Users\fakhr\Downloads'
+NAMA_KELAS = ['0', '1', '2', '3', '4', 'Bukan angka']
+
+BIRU = '#2F6DB5'
+ORANYE = '#E8943A'
+
+# 1. Grafik akurasi dan loss tiap epoch
+try:
+    sejarah = riwayat.history
+except NameError:
+    sejarah = None
+    print('Variabel riwayat belum ada. Ubah baris cnn.fit di Cell 7 jadi: riwayat = cnn.fit(..., validation_data=(X_test, y_test)), lalu jalankan Cell 7 lagi.')
+
+if sejarah is not None:
+    epoch = np.arange(1, len(sejarah['loss']) + 1)
+    terbaik = int(np.argmin(sejarah['val_loss'])) + 1       # epoch dengan loss validasi paling kecil
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 8))
+    for ax, kunci, judul in [(ax1, 'accuracy', 'Akurasi'), (ax2, 'loss', 'Loss')]:
+        ax.plot(epoch, sejarah[kunci], marker='o', markersize=4, color=BIRU, label='Latih')
+        ax.plot(epoch, sejarah['val_' + kunci], marker='o', markersize=4, color=ORANYE, label='Validasi')
+        ax.axvline(terbaik, color='gray', linestyle='--', linewidth=1)
+        ax.text(terbaik + 0.1, 0.02, 'epoch terbaik (%d)' % terbaik, transform=ax.get_xaxis_transform(),
+                color='gray', fontsize=8, va='bottom')
+        ax.set_title(judul, fontweight='bold')
+        ax.set_xlabel('Epoch')
+        ax.set_xticks(epoch)
+        ax.grid(alpha=0.3)
+        ax.legend()
+    fig.tight_layout()
+    fig.savefig(os.path.join(FOLDER_GRAFIK, 'grafik_akurasi_loss.png'), dpi=200, bbox_inches='tight')
+    plt.show()
+
+# 2. Confusion matrix (baris = jawaban benar, kolom = tebakan model)
+tebakan = np.argmax(cnn.predict(X_test, verbose=0), axis=1)
+benar = np.asarray(y_test).astype(int)
+
+jumlah = np.zeros((6, 6), dtype=int)
+np.add.at(jumlah, (benar, tebakan), 1)
+persen = jumlah / np.maximum(jumlah.sum(axis=1, keepdims=True), 1) * 100    # persen per baris
+
+fig, ax = plt.subplots(figsize=(7.5, 6.5))
+ax.imshow(persen, cmap='Blues', vmin=0, vmax=100)
+for i in range(6):
+    for j in range(6):
+        warna = 'white' if persen[i, j] > 50 else '#1a1a1a'
+        ax.text(j, i - 0.1, str(jumlah[i, j]), ha='center', va='center', color=warna, fontsize=13, fontweight='bold')
+        ax.text(j, i + 0.22, '%.1f%%' % persen[i, j], ha='center', va='center', color=warna, fontsize=8)
+ax.set_xticks(range(6))
+ax.set_xticklabels(NAMA_KELAS)
+ax.set_yticks(range(6))
+ax.set_yticklabels(NAMA_KELAS)
+ax.xaxis.tick_top()
+ax.xaxis.set_label_position('top')
+ax.set_xlabel('Tebakan model')
+ax.set_ylabel('Jawaban benar')
+ax.tick_params(length=0)
+for sisi in ax.spines.values():
+    sisi.set_visible(False)
+fig.tight_layout()
+fig.savefig(os.path.join(FOLDER_GRAFIK, 'grafik_confusion_matrix.png'), dpi=200, bbox_inches='tight')
+plt.show()
+
+# 3. Angka akurasi dan loss (untuk ditulis di slide)
+loss_uji, akurasi_uji = cnn.evaluate(X_test, y_test, verbose=0)
+print('Accuracy: %.4f' % akurasi_uji)
+print('Loss: %.4f' % loss_uji)
+print('Grafik tersimpan di:', FOLDER_GRAFIK)
